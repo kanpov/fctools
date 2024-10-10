@@ -84,8 +84,11 @@ full = [
     "grpc-vsock-ext",
     "link-local-ext",
     "snapshot-editor-ext",
+    "blocking-io-backend",
 ]
 default = []
+# io backends
+blocking-io-backend = []
 # layers
 shell-spawner = []
 executor = ["shell-spawner", "dep:libc"]

@@ -19,6 +19,7 @@ use fctools::{
         VmmExecutor, VmmExecutorError,
     },
     ext::fcnet::{FcnetConfiguration, FcnetNetnsOptions},
+    fs_backend::{blocking::BlockingFsBackend, FsBackend},
     process::VmmProcessState,
     shell_spawner::{SameUserShellSpawner, ShellSpawner, SuShellSpawner},
     vm::{
@@ -78,8 +79,13 @@ pub fn jail_join(path1: impl AsRef<Path>, path2: impl Into<PathBuf>) -> PathBuf 
 }
 
 #[allow(unused)]
-pub fn get_shell_spawner() -> impl ShellSpawner {
-    SameUserShellSpawner::new(which::which("bash").unwrap())
+pub fn get_shell_spawner() -> Arc<impl ShellSpawner> {
+    Arc::new(SameUserShellSpawner::new(which::which("bash").unwrap()))
+}
+
+#[allow(unused)]
+pub fn get_fs_backend() -> Arc<impl FsBackend> {
+    Arc::new(BlockingFsBackend)
 }
 
 #[derive(Default)]
@@ -152,19 +158,20 @@ impl VmmExecutor for TestExecutor {
     async fn prepare(
         &self,
         installation: &VmmInstallation,
-        shell_spawner: &impl ShellSpawner,
+        shell_spawner: Arc<impl ShellSpawner>,
+        fs_backend: Arc<impl FsBackend>,
         outer_paths: Vec<PathBuf>,
     ) -> Result<HashMap<PathBuf, PathBuf>, VmmExecutorError> {
         match self {
-            TestExecutor::Unrestricted(e) => e.prepare(installation, shell_spawner, outer_paths).await,
-            TestExecutor::Jailed(e) => e.prepare(installation, shell_spawner, outer_paths).await,
+            TestExecutor::Unrestricted(e) => e.prepare(installation, shell_spawner, fs_backend, outer_paths).await,
+            TestExecutor::Jailed(e) => e.prepare(installation, shell_spawner, fs_backend, outer_paths).await,
         }
     }
 
     async fn invoke(
         &self,
         installation: &VmmInstallation,
-        shell_spawner: &impl ShellSpawner,
+        shell_spawner: Arc<impl ShellSpawner>,
         config_override: ConfigurationFileOverride,
     ) -> Result<Child, VmmExecutorError> {
         match self {
@@ -176,11 +183,12 @@ impl VmmExecutor for TestExecutor {
     async fn cleanup(
         &self,
         installation: &VmmInstallation,
-        shell_spawner: &impl ShellSpawner,
+        shell_spawner: Arc<impl ShellSpawner>,
+        fs_backend: Arc<impl FsBackend>,
     ) -> Result<(), VmmExecutorError> {
         match self {
-            TestExecutor::Unrestricted(e) => e.cleanup(installation, shell_spawner).await,
-            TestExecutor::Jailed(e) => e.cleanup(installation, shell_spawner).await,
+            TestExecutor::Unrestricted(e) => e.cleanup(installation, shell_spawner, fs_backend).await,
+            TestExecutor::Jailed(e) => e.cleanup(installation, shell_spawner, fs_backend).await,
         }
     }
 }
@@ -216,7 +224,7 @@ pub fn env_get_boot_socket_wait() -> Duration {
 // VMM TEST FRAMEWORK
 
 #[allow(unused)]
-pub type TestVmmProcess = fctools::process::VmmProcess<TestExecutor, TestShellSpawner>;
+pub type TestVmmProcess = fctools::process::VmmProcess<TestExecutor, TestShellSpawner, BlockingFsBackend>;
 
 #[allow(unused)]
 pub async fn run_vmm_process_test<F, Fut>(closure: F)
@@ -276,12 +284,14 @@ fn get_vmm_processes() -> (TestVmmProcess, TestVmmProcess) {
         TestVmmProcess::new(
             TestExecutor::Unrestricted(unrestricted_executor),
             TestShellSpawner::SameUser(same_user_shell_spawner),
+            BlockingFsBackend,
             get_real_firecracker_installation(),
             vec![],
         ),
         TestVmmProcess::new(
             TestExecutor::Jailed(jailed_executor),
             TestShellSpawner::Su(su_shell_spawner),
+            BlockingFsBackend,
             get_real_firecracker_installation(),
             vec![
                 get_test_path("vmlinux-6.1"),
@@ -295,7 +305,7 @@ fn get_vmm_processes() -> (TestVmmProcess, TestVmmProcess) {
 // VM TEST FRAMEWORK
 
 #[allow(unused)]
-pub type TestVm = fctools::vm::Vm<TestExecutor, TestShellSpawner>;
+pub type TestVm = fctools::vm::Vm<TestExecutor, TestShellSpawner, BlockingFsBackend>;
 
 type PreStartHook = Box<dyn FnOnce(&mut TestVm) -> BoxFuture<()>>;
 
@@ -590,9 +600,10 @@ impl VmBuilder {
             drop(lock);
         }
 
-        let mut vm: fctools::vm::Vm<TestExecutor, TestShellSpawner> = TestVm::prepare_arced(
+        let mut vm: fctools::vm::Vm<TestExecutor, TestShellSpawner, BlockingFsBackend> = TestVm::prepare_arced(
             Arc::new(executor),
             run_context.shell_spawner.clone(),
+            Arc::new(BlockingFsBackend),
             get_real_firecracker_installation().into(),
             configuration,
         )

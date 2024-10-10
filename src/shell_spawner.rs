@@ -10,7 +10,7 @@ use tokio::{
 /// The command delegated to the shell is either a firecracker or jailer invocation for starting the respective
 /// processes, or a chown operation used by executors in order to elevate permissions.
 #[async_trait]
-pub trait ShellSpawner: Send + Sync {
+pub trait ShellSpawner: Send + Sync + 'static {
     /// Whether the child processes spawned by this shell spawner have the same user and group ID as that of the
     /// main process itself (e.g. whether the shell spawner increases privileges for the child process).
     fn increases_privileges(&self) -> bool;

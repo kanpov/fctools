@@ -8,6 +8,7 @@ use std::{
 
 use crate::{
     executor::{arguments::ConfigurationFileOverride, installation::VmmInstallation, VmmExecutor},
+    fs_backend::FsBackend,
     process::{VmmProcess, VmmProcessError, VmmProcessPipes, VmmProcessState},
     shell_spawner::ShellSpawner,
 };
@@ -27,8 +28,8 @@ pub mod snapshot;
 /// executor compatibility, moving resources in and out, transforming resource paths from inner to outer and vice versa,
 /// removing VM traces, creating snapshots.
 #[derive(Debug)]
-pub struct Vm<E: VmmExecutor, S: ShellSpawner> {
-    vmm_process: VmmProcess<E, S>,
+pub struct Vm<E: VmmExecutor, S: ShellSpawner, F: FsBackend> {
+    vmm_process: VmmProcess<E, S, F>,
     is_paused: bool,
     original_configuration_data: VmConfigurationData,
     configuration: Option<VmConfiguration>,
@@ -133,17 +134,19 @@ pub struct AccessiblePaths {
     pub vsock_listener_paths: Vec<PathBuf>,
 }
 
-impl<E: VmmExecutor, S: ShellSpawner> Vm<E, S> {
+impl<E: VmmExecutor, S: ShellSpawner, F: FsBackend> Vm<E, S, F> {
     /// Prepare the full environment of a VM without booting it.
     pub async fn prepare(
         executor: E,
         shell_spawner: S,
+        fs_backend: F,
         installation: VmmInstallation,
         configuration: VmConfiguration,
     ) -> Result<Self, VmError> {
         Self::prepare_arced(
             Arc::new(executor),
             Arc::new(shell_spawner),
+            Arc::new(fs_backend),
             Arc::new(installation),
             configuration,
         )
@@ -155,6 +158,7 @@ impl<E: VmmExecutor, S: ShellSpawner> Vm<E, S> {
     pub async fn prepare_arced(
         executor: Arc<E>,
         shell_spawner_arc: Arc<S>,
+        fs_backend_arc: Arc<F>,
         installation_arc: Arc<VmmInstallation>,
         mut configuration: VmConfiguration,
     ) -> Result<Self, VmError> {
@@ -193,7 +197,13 @@ impl<E: VmmExecutor, S: ShellSpawner> Vm<E, S> {
 
         // prepare
         let executor_traceless = executor.traceless();
-        let mut vmm_process = VmmProcess::new_arced(executor, shell_spawner_arc, installation_arc, outer_paths);
+        let mut vmm_process = VmmProcess::new_arced(
+            executor,
+            shell_spawner_arc,
+            fs_backend_arc,
+            installation_arc,
+            outer_paths,
+        );
         let mut path_mappings = vmm_process.prepare().await.map_err(VmError::ProcessError)?;
 
         // transform data according to returned mappings

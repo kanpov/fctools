@@ -1,19 +1,23 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
-use tokio::{fs, process::Child};
+use tokio::{process::Child, task::JoinSet};
 
-use crate::shell_spawner::ShellSpawner;
+use crate::{
+    fs_backend::{FsBackend, FsOperation},
+    shell_spawner::ShellSpawner,
+};
 
 use super::{
     arguments::{ConfigurationFileOverride, VmmApiSocket, VmmArguments},
     command_modifier::{apply_command_modifier_chain, CommandModifier},
     create_file_with_tree, force_chown,
     installation::VmmInstallation,
-    VmmExecutor, VmmExecutorError,
+    join_on_set, VmmExecutor, VmmExecutorError,
 };
 
 /// An executor that uses the "firecracker" binary directly, without jailing it or ensuring it doesn't run as root.
@@ -169,38 +173,68 @@ impl VmmExecutor for UnrestrictedVmmExecutor {
     async fn prepare(
         &self,
         _installation: &VmmInstallation,
-        shell_spawner: &impl ShellSpawner,
+        shell_spawner: Arc<impl ShellSpawner>,
+        fs_backend: Arc<impl FsBackend>,
         outer_paths: Vec<PathBuf>,
     ) -> Result<HashMap<PathBuf, PathBuf>, VmmExecutorError> {
-        for path in &outer_paths {
-            if !fs::try_exists(path).await.map_err(VmmExecutorError::IoError)? {
-                return Err(VmmExecutorError::ExpectedResourceMissing(path.clone()));
-            }
-            force_chown(&path, shell_spawner).await?;
+        let mut join_set = JoinSet::new();
+
+        for path in outer_paths.clone() {
+            let fs_backend = fs_backend.clone();
+            let shell_spawner = shell_spawner.clone();
+            join_set.spawn(async move {
+                if !fs_backend
+                    .check_exists(&path)
+                    .block_on()
+                    .await
+                    .map_err(VmmExecutorError::IoError)?
+                {
+                    return Err(VmmExecutorError::ExpectedResourceMissing(path.clone()));
+                }
+
+                force_chown(&path, shell_spawner.as_ref()).await?;
+                Ok(())
+            });
         }
 
-        if let VmmApiSocket::Enabled(ref socket_path) = self.vmm_arguments.api_socket {
-            if fs::try_exists(socket_path).await.map_err(VmmExecutorError::IoError)? {
-                force_chown(socket_path, shell_spawner).await?;
-                fs::remove_file(socket_path).await.map_err(VmmExecutorError::IoError)?;
-            }
+        if let VmmApiSocket::Enabled(socket_path) = self.vmm_arguments.api_socket.clone() {
+            let fs_backend = fs_backend.clone();
+            let shell_spawner = shell_spawner.clone();
+            join_set.spawn(async move {
+                if fs_backend
+                    .check_exists(&socket_path)
+                    .block_on()
+                    .await
+                    .map_err(VmmExecutorError::IoError)?
+                {
+                    force_chown(&socket_path, shell_spawner.as_ref()).await?;
+                    fs_backend
+                        .remove_file(&socket_path)
+                        .block_on()
+                        .await
+                        .map_err(VmmExecutorError::IoError)?;
+                }
+
+                Ok(())
+            });
         }
 
         // Ensure argument paths exist
         if let Some(ref log_path) = self.vmm_arguments.log_path {
-            create_file_with_tree(log_path).await?;
+            join_set.spawn(create_file_with_tree(fs_backend.clone(), log_path.clone()));
         }
         if let Some(ref metrics_path) = self.vmm_arguments.metrics_path {
-            create_file_with_tree(metrics_path).await?;
+            join_set.spawn(create_file_with_tree(fs_backend.clone(), metrics_path.clone()));
         }
 
+        join_on_set(join_set).await?;
         Ok(outer_paths.into_iter().map(|path| (path.clone(), path)).collect())
     }
 
     async fn invoke(
         &self,
         installation: &VmmInstallation,
-        shell_spawner: &impl ShellSpawner,
+        shell_spawner: Arc<impl ShellSpawner>,
         config_override: ConfigurationFileOverride,
     ) -> Result<Child, VmmExecutorError> {
         let arguments = self.vmm_arguments.join(config_override);
@@ -221,27 +255,57 @@ impl VmmExecutor for UnrestrictedVmmExecutor {
     async fn cleanup(
         &self,
         _installation: &VmmInstallation,
-        shell_spawner: &impl ShellSpawner,
+        shell_spawner: Arc<impl ShellSpawner>,
+        fs_backend: Arc<impl FsBackend>,
     ) -> Result<(), VmmExecutorError> {
-        if let VmmApiSocket::Enabled(ref socket_path) = self.vmm_arguments.api_socket {
-            if fs::try_exists(socket_path).await.map_err(VmmExecutorError::IoError)? {
-                force_chown(socket_path, shell_spawner).await?;
-                fs::remove_file(socket_path).await.map_err(VmmExecutorError::IoError)?;
-            }
+        let mut join_set = JoinSet::new();
+
+        if let VmmApiSocket::Enabled(socket_path) = self.vmm_arguments.api_socket.clone() {
+            let shell_spawner = shell_spawner.clone();
+            let fs_backend = fs_backend.clone();
+            join_set.spawn(async move {
+                if fs_backend
+                    .check_exists(&socket_path)
+                    .block_on()
+                    .await
+                    .map_err(VmmExecutorError::IoError)?
+                {
+                    force_chown(&socket_path, shell_spawner.as_ref()).await?;
+                    fs_backend
+                        .remove_file(&socket_path)
+                        .block_on()
+                        .await
+                        .map_err(VmmExecutorError::IoError)?;
+                }
+                Ok(())
+            });
         }
 
         if self.remove_logs_on_cleanup {
-            if let Some(ref log_path) = self.vmm_arguments.log_path {
-                fs::remove_file(log_path).await.map_err(VmmExecutorError::IoError)?;
+            if let Some(log_path) = self.vmm_arguments.log_path.clone() {
+                let fs_backend = fs_backend.clone();
+                join_set.spawn(async move {
+                    fs_backend
+                        .remove_file(&log_path)
+                        .block_on()
+                        .await
+                        .map_err(VmmExecutorError::IoError)
+                });
             }
         }
 
         if self.remove_metrics_on_cleanup {
-            if let Some(ref metrics_path) = self.vmm_arguments.metrics_path {
-                fs::remove_file(metrics_path).await.map_err(VmmExecutorError::IoError)?;
+            if let Some(metrics_path) = self.vmm_arguments.metrics_path.clone() {
+                join_set.spawn(async move {
+                    fs_backend
+                        .remove_file(&metrics_path)
+                        .block_on()
+                        .await
+                        .map_err(VmmExecutorError::IoError)
+                });
             }
         }
 
-        Ok(())
+        join_on_set(join_set).await
     }
 }

@@ -5,7 +5,7 @@ use http_body_util::Full;
 use hyper::body::Incoming;
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::{executor::VmmExecutor, process::HyperResponseExt, shell_spawner::ShellSpawner};
+use crate::{executor::VmmExecutor, fs_backend::FsBackend, process::HyperResponseExt, shell_spawner::ShellSpawner};
 
 use super::{
     configuration::VmConfigurationData,
@@ -79,7 +79,7 @@ pub trait VmApi {
 }
 
 #[async_trait]
-impl<E: VmmExecutor, S: ShellSpawner> VmApi for Vm<E, S> {
+impl<E: VmmExecutor, S: ShellSpawner, F: FsBackend> VmApi for Vm<E, S, F> {
     async fn api_custom_request(
         &mut self,
         route: impl AsRef<str> + Send,
@@ -195,7 +195,7 @@ impl<E: VmmExecutor, S: ShellSpawner> VmApi for Vm<E, S> {
     async fn api_get_firecracker_version(&mut self) -> Result<String, VmError> {
         self.ensure_paused_or_running()?;
         Ok(
-            send_api_request_with_response::<ReprFirecrackerVersion, _, _>(self, "/version", "GET", None::<i32>)
+            send_api_request_with_response::<ReprFirecrackerVersion, _, _, _>(self, "/version", "GET", None::<i32>)
                 .await?
                 .firecracker_version,
         )
@@ -267,8 +267,8 @@ impl<E: VmmExecutor, S: ShellSpawner> VmApi for Vm<E, S> {
     }
 }
 
-pub(super) async fn init_new<E: VmmExecutor, S: ShellSpawner>(
-    vm: &mut Vm<E, S>,
+pub(super) async fn init_new<E: VmmExecutor, S: ShellSpawner, F: FsBackend>(
+    vm: &mut Vm<E, S, F>,
     data: VmConfigurationData,
 ) -> Result<(), VmError> {
     send_api_request(vm, "/boot-source", "PUT", Some(&data.boot_source)).await?;
@@ -328,8 +328,8 @@ pub(super) async fn init_new<E: VmmExecutor, S: ShellSpawner>(
     .await
 }
 
-pub(super) async fn init_restored_from_snapshot<E: VmmExecutor, S: ShellSpawner>(
-    vm: &mut Vm<E, S>,
+pub(super) async fn init_restored_from_snapshot<E: VmmExecutor, S: ShellSpawner, F: FsBackend>(
+    vm: &mut Vm<E, S, F>,
     data: VmConfigurationData,
     load_snapshot: LoadSnapshot,
 ) -> Result<(), VmError> {
@@ -344,8 +344,8 @@ pub(super) async fn init_restored_from_snapshot<E: VmmExecutor, S: ShellSpawner>
     send_api_request(vm, "/snapshot/load", "PUT", Some(&load_snapshot)).await
 }
 
-async fn send_api_request<E: VmmExecutor, S: ShellSpawner>(
-    vm: &mut Vm<E, S>,
+async fn send_api_request<E: VmmExecutor, S: ShellSpawner, F: FsBackend>(
+    vm: &mut Vm<E, S, F>,
     route: &str,
     method: &str,
     request_body: Option<impl Serialize>,
@@ -358,8 +358,8 @@ async fn send_api_request<E: VmmExecutor, S: ShellSpawner>(
     }
 }
 
-async fn send_api_request_with_response<Resp: DeserializeOwned, E: VmmExecutor, S: ShellSpawner>(
-    vm: &mut Vm<E, S>,
+async fn send_api_request_with_response<Resp: DeserializeOwned, E: VmmExecutor, S: ShellSpawner, F: FsBackend>(
+    vm: &mut Vm<E, S, F>,
     route: &str,
     method: &str,
     request_body: Option<impl Serialize>,
@@ -368,8 +368,8 @@ async fn send_api_request_with_response<Resp: DeserializeOwned, E: VmmExecutor, 
     serde_json::from_str(&response_json).map_err(VmError::SerdeError)
 }
 
-async fn send_api_request_internal<E: VmmExecutor, S: ShellSpawner>(
-    vm: &mut Vm<E, S>,
+async fn send_api_request_internal<E: VmmExecutor, S: ShellSpawner, F: FsBackend>(
+    vm: &mut Vm<E, S, F>,
     route: &str,
     method: &str,
     request_body: Option<impl Serialize>,

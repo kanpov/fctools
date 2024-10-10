@@ -8,7 +8,7 @@ use hyper::{body::Incoming, client::conn::http1::SendRequest};
 use hyper_client_sockets::{FirecrackerUriExt, HyperFirecrackerConnector, HyperFirecrackerStream};
 use hyper_util::rt::TokioExecutor;
 
-use crate::{executor::VmmExecutor, shell_spawner::ShellSpawner, vm::Vm};
+use crate::{executor::VmmExecutor, fs_backend::FsBackend, shell_spawner::ShellSpawner, vm::Vm};
 
 /// An error that can be emitted by the HTTP-over-vsock extension.
 #[derive(Debug, thiserror::Error)]
@@ -70,7 +70,7 @@ pub trait VsockHttpExt {
 }
 
 #[async_trait]
-impl<E: VmmExecutor, S: ShellSpawner> VsockHttpExt for Vm<E, S> {
+impl<E: VmmExecutor, S: ShellSpawner, F: FsBackend> VsockHttpExt for Vm<E, S, F> {
     async fn vsock_connect_over_http(&self, guest_port: u32) -> Result<SendRequest<Full<Bytes>>, VsockHttpError> {
         let uds_path = self
             .get_accessible_paths()

@@ -2,13 +2,13 @@ use std::path::PathBuf;
 
 use assert_matches::assert_matches;
 use fctools::executor::{
-    arguments::{VmmApiSocket, VmmArguments, ConfigurationFileOverride, JailerArguments},
+    arguments::{ConfigurationFileOverride, JailerArguments, VmmApiSocket, VmmArguments},
     command_modifier::{AppendCommandModifier, RewriteCommandModifier},
     jailed::{FlatJailRenamer, JailMoveMethod, JailRenamer, JailedVmmExecutor},
     VmmExecutor, VmmExecutorError,
 };
 use rand::RngCore;
-use test_framework::{get_fake_firecracker_installation, get_shell_spawner, get_tmp_path, jail_join};
+use test_framework::{get_fake_firecracker_installation, get_fs_backend, get_shell_spawner, get_tmp_path, jail_join};
 use tokio::fs::{create_dir_all, metadata, read_to_string, remove_dir_all, try_exists, write, File};
 
 mod test_framework;
@@ -46,7 +46,12 @@ async fn jailed_executor_prepare_creates_chroot_base_dir() {
     let chroot_base_dir = get_tmp_path();
     let (executor, _) = setup_executor(Some(chroot_base_dir.clone()), None, None, None, None);
     executor
-        .prepare(&get_fake_firecracker_installation(), &get_shell_spawner(), vec![])
+        .prepare(
+            &get_fake_firecracker_installation(),
+            get_shell_spawner(),
+            get_fs_backend(),
+            vec![],
+        )
         .await
         .unwrap();
     assert!(metadata(&chroot_base_dir).await.unwrap().is_dir());
@@ -57,7 +62,12 @@ async fn jailed_executor_prepare_creates_chroot_base_dir() {
 async fn jailed_executor_prepare_defaults_to_srv_jailer() {
     let (executor, jail_path) = setup_executor(None, None, None, None, None);
     executor
-        .prepare(&get_fake_firecracker_installation(), &get_shell_spawner(), vec![])
+        .prepare(
+            &get_fake_firecracker_installation(),
+            get_shell_spawner(),
+            get_fs_backend(),
+            vec![],
+        )
         .await
         .unwrap();
     assert!(metadata(&jail_path).await.unwrap().is_dir());
@@ -72,7 +82,12 @@ async fn jailed_executor_prepare_deletes_existing_jail() {
     File::create_new(&jail_inner_path).await.unwrap();
 
     executor
-        .prepare(&get_fake_firecracker_installation(), &get_shell_spawner(), vec![])
+        .prepare(
+            &get_fake_firecracker_installation(),
+            get_shell_spawner(),
+            get_fs_backend(),
+            vec![],
+        )
         .await
         .unwrap();
     assert!(!try_exists(jail_inner_path).await.unwrap());
@@ -84,7 +99,12 @@ async fn jailed_executor_prepare_deletes_existing_jail() {
 async fn jailed_executor_prepare_creates_socket_parent_directory() {
     let (executor, jail_path) = setup_executor(None, Some(PathBuf::from("/parent_dir/socket")), None, None, None);
     executor
-        .prepare(&get_fake_firecracker_installation(), &get_shell_spawner(), vec![])
+        .prepare(
+            &get_fake_firecracker_installation(),
+            get_shell_spawner(),
+            get_fs_backend(),
+            vec![],
+        )
         .await
         .unwrap();
     assert!(try_exists(jail_path.join("parent_dir")).await.unwrap());
@@ -95,7 +115,12 @@ async fn jailed_executor_prepare_creates_socket_parent_directory() {
 async fn jailed_executor_prepare_creates_log_file() {
     let (executor, jail_path) = setup_executor(None, None, Some(PathBuf::from("/log.txt")), None, None);
     executor
-        .prepare(&get_fake_firecracker_installation(), &get_shell_spawner(), vec![])
+        .prepare(
+            &get_fake_firecracker_installation(),
+            get_shell_spawner(),
+            get_fs_backend(),
+            vec![],
+        )
         .await
         .unwrap();
     assert!(try_exists(jail_path.join("log.txt")).await.unwrap());
@@ -106,7 +131,12 @@ async fn jailed_executor_prepare_creates_log_file() {
 async fn jailed_executor_prepare_creates_metrics_file() {
     let (executor, jail_path) = setup_executor(None, None, None, Some(PathBuf::from("/metrics.txt")), None);
     executor
-        .prepare(&get_fake_firecracker_installation(), &get_shell_spawner(), vec![])
+        .prepare(
+            &get_fake_firecracker_installation(),
+            get_shell_spawner(),
+            get_fs_backend(),
+            vec![],
+        )
         .await
         .unwrap();
     assert!(try_exists(jail_path.join("metrics.txt")).await.unwrap());
@@ -121,7 +151,8 @@ async fn jailed_executor_prepare_checks_for_missing_resources() {
         executor
             .prepare(
                 &get_fake_firecracker_installation(),
-                &get_shell_spawner(),
+                get_shell_spawner(),
+                get_fs_backend(),
                 vec![resource_path.clone()]
             )
             .await,
@@ -154,7 +185,7 @@ async fn jailed_executor_invoke_applies_command_modifier_chain() {
     let child = executor
         .invoke(
             &get_fake_firecracker_installation(),
-            &get_shell_spawner(),
+            get_shell_spawner(),
             ConfigurationFileOverride::NoOverride,
         )
         .await
@@ -169,12 +200,21 @@ async fn jailed_executor_invoke_applies_command_modifier_chain() {
 async fn jailed_executor_cleanup_recursively_removes_entire_jail() {
     let (executor, jail_path) = setup_executor(None, None, None, None, None);
     executor
-        .prepare(&get_fake_firecracker_installation(), &get_shell_spawner(), vec![])
+        .prepare(
+            &get_fake_firecracker_installation(),
+            get_shell_spawner(),
+            get_fs_backend(),
+            vec![],
+        )
         .await
         .unwrap();
     assert!(try_exists(&jail_path).await.unwrap());
     executor
-        .cleanup(&get_fake_firecracker_installation(), &get_shell_spawner())
+        .cleanup(
+            &get_fake_firecracker_installation(),
+            get_shell_spawner(),
+            get_fs_backend(),
+        )
         .await
         .unwrap();
     assert!(!try_exists(jail_path).await.unwrap());
@@ -194,7 +234,8 @@ async fn move_test_imp(jail_move_method: JailMoveMethod, try_cross_device: bool)
         executor
             .prepare(
                 &get_fake_firecracker_installation(),
-                &get_shell_spawner(),
+                get_shell_spawner(),
+                get_fs_backend(),
                 vec![resource_path.clone()]
             )
             .await

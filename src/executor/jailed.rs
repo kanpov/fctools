@@ -1,12 +1,13 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
 use tokio::{process::Child, task::JoinSet};
 
-use crate::shell_spawner::ShellSpawner;
+use crate::{fs_backend::FsBackend, shell_spawner::ShellSpawner};
 
 use super::{
     arguments::{ConfigurationFileOverride, JailerArguments, VmmApiSocket, VmmArguments},
@@ -87,7 +88,8 @@ impl<T: JailRenamer + 'static> VmmExecutor for JailedVmmExecutor<T> {
     async fn prepare(
         &self,
         installation: &VmmInstallation,
-        shell_spawner: &impl ShellSpawner,
+        shell_spawner: Arc<impl ShellSpawner>,
+        fs_backend: Arc<impl FsBackend>,
         outer_paths: Vec<PathBuf>,
     ) -> Result<HashMap<PathBuf, PathBuf>, VmmExecutorError> {
         // Ensure chroot base dir exists and is accessible
@@ -99,9 +101,9 @@ impl<T: JailRenamer + 'static> VmmExecutor for JailedVmmExecutor<T> {
             .await
             .map_err(VmmExecutorError::IoError)?
         {
-            force_mkdir(chroot_base_dir, shell_spawner).await?;
+            force_mkdir(chroot_base_dir, shell_spawner.as_ref()).await?;
         }
-        force_chown(chroot_base_dir, shell_spawner).await?; // grants access to jail as well
+        force_chown(chroot_base_dir, shell_spawner.as_ref()).await?; // grants access to jail as well
 
         // Create jail and delete previous one if necessary
         let jail_path = self.get_jail_path(installation);
@@ -128,10 +130,10 @@ impl<T: JailRenamer + 'static> VmmExecutor for JailedVmmExecutor<T> {
 
         // Ensure argument paths exist
         if let Some(ref log_path) = self.vmm_arguments.log_path {
-            create_file_with_tree(jail_path.jail_join(log_path)).await?;
+            create_file_with_tree(fs_backend.clone(), jail_path.jail_join(log_path)).await?;
         }
         if let Some(ref metrics_path) = self.vmm_arguments.metrics_path {
-            create_file_with_tree(jail_path.jail_join(metrics_path)).await?;
+            create_file_with_tree(fs_backend.clone(), jail_path.jail_join(metrics_path)).await?;
         }
 
         // Apply jail renamer and move in the resources in parallel (via a join set)
@@ -146,7 +148,7 @@ impl<T: JailRenamer + 'static> VmmExecutor for JailedVmmExecutor<T> {
                 return Err(VmmExecutorError::ExpectedResourceMissing(outer_path.clone()));
             }
 
-            force_chown(&outer_path, shell_spawner).await?;
+            force_chown(&outer_path, shell_spawner.as_ref()).await?;
 
             let inner_path = self
                 .jail_renamer
@@ -162,6 +164,7 @@ impl<T: JailRenamer + 'static> VmmExecutor for JailedVmmExecutor<T> {
                 if let Some(new_path_parent_dir) = expanded_inner_path.parent() {
                     std::fs::create_dir_all(new_path_parent_dir)?;
                 }
+
                 match jail_move_method {
                     JailMoveMethod::Copy => std::fs::copy(outer_path, expanded_inner_path).map(|_| ()),
                     JailMoveMethod::HardLink => std::fs::hard_link(outer_path, expanded_inner_path),
@@ -189,7 +192,7 @@ impl<T: JailRenamer + 'static> VmmExecutor for JailedVmmExecutor<T> {
     async fn invoke(
         &self,
         installation: &VmmInstallation,
-        shell: &impl ShellSpawner,
+        shell_spawner: Arc<impl ShellSpawner>,
         config_override: ConfigurationFileOverride,
     ) -> Result<Child, VmmExecutorError> {
         let jailer_args = self.jailer_arguments.join(&installation.firecracker_path);
@@ -201,7 +204,7 @@ impl<T: JailRenamer + 'static> VmmExecutor for JailedVmmExecutor<T> {
         apply_command_modifier_chain(&mut shell_command, &self.command_modifier_chain);
 
         // nulling the pipes is redundant since jailer can do this itself via daemonization
-        shell
+        shell_spawner
             .spawn(shell_command, false)
             .await
             .map_err(VmmExecutorError::ShellSpawnFailed)
@@ -210,7 +213,8 @@ impl<T: JailRenamer + 'static> VmmExecutor for JailedVmmExecutor<T> {
     async fn cleanup(
         &self,
         installation: &VmmInstallation,
-        _shell_spawner: &impl ShellSpawner,
+        _shell_spawner: Arc<impl ShellSpawner>,
+        _fs_backend: Arc<impl FsBackend>,
     ) -> Result<(), VmmExecutorError> {
         let jail_path = self.get_jail_path(installation);
         let jail_parent_path = jail_path
@@ -230,6 +234,7 @@ impl<R: JailRenamer + 'static> JailedVmmExecutor<R> {
             Some(ref path) => path.clone(),
             None => PathBuf::from("/srv/jailer"),
         };
+
         // example: /srv/jailer/firecracker/1/root
         chroot_base_dir
             .join(

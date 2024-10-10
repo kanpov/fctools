@@ -22,15 +22,17 @@ use crate::{
     executor::{
         arguments::ConfigurationFileOverride, force_chown, installation::VmmInstallation, VmmExecutor, VmmExecutorError,
     },
+    fs_backend::FsBackend,
     shell_spawner::ShellSpawner,
 };
 
 /// A VMM process is layer 3 of FCTools: an abstraction that manages a VMM process. It is
 /// tied to the given VMM executor E and shell spawner S.
 #[derive(Debug)]
-pub struct VmmProcess<E: VmmExecutor, S: ShellSpawner> {
+pub struct VmmProcess<E: VmmExecutor, S: ShellSpawner, F: FsBackend> {
     executor: Arc<E>,
     shell_spawner: Arc<S>,
+    fs_backend: Arc<F>,
     installation: Arc<VmmInstallation>,
     child: Option<Child>,
     state: VmmProcessState,
@@ -115,12 +117,19 @@ pub enum VmmProcessError {
     PipesNulledOrAlreadyTaken,
 }
 
-impl<E: VmmExecutor, S: ShellSpawner> VmmProcess<E, S> {
+impl<E: VmmExecutor, S: ShellSpawner, F: FsBackend> VmmProcess<E, S, F> {
     /// Create a new process instance while moving in its components.
-    pub fn new(executor: E, shell_spawner: S, installation: VmmInstallation, outer_paths: Vec<PathBuf>) -> Self {
+    pub fn new(
+        executor: E,
+        shell_spawner: S,
+        fs_backend: F,
+        installation: VmmInstallation,
+        outer_paths: Vec<PathBuf>,
+    ) -> Self {
         Self::new_arced(
             Arc::new(executor),
             Arc::new(shell_spawner),
+            Arc::new(fs_backend),
             Arc::new(installation),
             outer_paths,
         )
@@ -131,6 +140,7 @@ impl<E: VmmExecutor, S: ShellSpawner> VmmProcess<E, S> {
     pub fn new_arced(
         executor_arc: Arc<E>,
         shell_spawner_arc: Arc<S>,
+        fs_backend_arc: Arc<F>,
         installation_arc: Arc<VmmInstallation>,
         outer_paths: Vec<PathBuf>,
     ) -> Self {
@@ -139,6 +149,7 @@ impl<E: VmmExecutor, S: ShellSpawner> VmmProcess<E, S> {
             executor: executor_arc,
             shell_spawner: shell_spawner_arc,
             installation: installation_arc,
+            fs_backend: fs_backend_arc,
             child: None,
             state: VmmProcessState::AwaitingPrepare,
             socket_path,
@@ -154,7 +165,8 @@ impl<E: VmmExecutor, S: ShellSpawner> VmmProcess<E, S> {
             .executor
             .prepare(
                 self.installation.as_ref(),
-                self.shell_spawner.as_ref(),
+                self.shell_spawner.clone(),
+                self.fs_backend.clone(),
                 self.outer_paths
                     .take()
                     .expect("Outer paths cannot ever be none, unreachable"),
@@ -170,7 +182,7 @@ impl<E: VmmExecutor, S: ShellSpawner> VmmProcess<E, S> {
         self.ensure_state(VmmProcessState::AwaitingStart)?;
         self.child = Some(
             self.executor
-                .invoke(self.installation.as_ref(), self.shell_spawner.as_ref(), config_override)
+                .invoke(self.installation.as_ref(), self.shell_spawner.clone(), config_override)
                 .await
                 .map_err(VmmProcessError::ExecutorError)?,
         );
@@ -291,7 +303,11 @@ impl<E: VmmExecutor, S: ShellSpawner> VmmProcess<E, S> {
     pub async fn cleanup(&mut self) -> Result<(), VmmProcessError> {
         self.ensure_exited_or_crashed()?;
         self.executor
-            .cleanup(self.installation.as_ref(), self.shell_spawner.as_ref())
+            .cleanup(
+                self.installation.as_ref(),
+                self.shell_spawner.clone(),
+                self.fs_backend.clone(),
+            )
             .await
             .map_err(VmmProcessError::ExecutorError)?;
         Ok(())
